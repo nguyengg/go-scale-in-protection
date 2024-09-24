@@ -213,6 +213,7 @@ func (s *ScaleInProtector) init(ctx context.Context) error {
 
 	s.ach = make(chan string)
 	s.ich = make(chan string)
+	s.active = make(map[string]bool)
 
 	return nil
 }
