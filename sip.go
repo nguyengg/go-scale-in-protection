@@ -92,6 +92,7 @@ mainLoop:
 					}
 				}
 				if s.IdleAtLeast > 0 {
+					s.Logger.Printf("all workers idle, will disable scale-in protection in %.4f seconds", s.IdleAtLeast.Seconds())
 					delay = time.NewTimer(s.IdleAtLeast)
 					continue mainLoop
 				}
