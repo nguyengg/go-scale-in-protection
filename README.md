@@ -57,8 +57,16 @@ func main() {
 		IdleAtLeast: 15 * time.Minute,
 	}
 
-	// start the workers first. the monitor doesn't need to know beforehand how many workers are there but you should
-	// signal active at least once because the monitor starts out assuming all workers are idle.
+	// always starts the monitor's main loop in a goroutine first because it doesn't return until context is cancelled
+	// or it encounters an error. the loop must be started first so that SignalActive and SignalIdle aren't blocked.
+	go func() {
+		if err := s.StartMonitoring(ctx); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	// start the workers afterwards. the monitor doesn't need to know beforehand how many workers are there but you
+	// should signal active at least once because the monitor starts out assuming all workers are idle.
 	workerCount := 5
 	var wg sync.WaitGroup
 	for i := range workerCount {
@@ -82,13 +90,5 @@ func main() {
 			}
 		}()
 	}
-
-	// always starts the monitor's main loop in a goroutine because it doesn't return until context is cancelled, or it
-	// runs into an error.
-	go func() {
-		if err := s.StartMonitoring(ctx); err != nil {
-			log.Fatal(err)
-		}
-	}()
 }
 ```
