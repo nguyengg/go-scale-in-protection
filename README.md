@@ -1,10 +1,8 @@
 # go-scale-in-protection
 
-Monitor workers' statuses to enable or disable instance scale-in protection accordingly.
+[![Go Reference](https://pkg.go.dev/badge/github.com/nguyengg/go-scale-in-protection.svg)](https://pkg.go.dev/github.com/nguyengg/go-scale-in-protection)
 
-```bash
-go get github.com/nguyengg/go-scale-in-protection
-```
+Monitor workers' statuses to enable or disable instance scale-in protection accordingly.
 
 ## Inspiration
 
@@ -24,15 +22,20 @@ while (true)
 
 Essentially, if you have any number of workers who can be either ACTIVE or IDLE, you generally want to enable scale-in
 protection when any of your worker is actively doing some work, while once all the workers have become idle, you would
-want to disable scale-in protection to let the Auto Scaling group reclaim our instance naturally.
+want to disable scale-in protection to let the Auto Scaling group reclaim your instance naturally.
 
 ## Usage
+
+```bash
+go get github.com/nguyengg/go-scale-in-protection
+```
 
 ```go
 package main
 
 import (
 	"context"
+	"errors"
 	sip "github.com/nguyengg/go-scale-in-protection"
 	"log"
 	"os"
@@ -61,11 +64,15 @@ func main() {
 	// or it encounters an error. the loop must be started first so that SignalActive and SignalIdle aren't blocked.
 	go func() {
 		if err := s.StartMonitoring(ctx); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+
 			log.Fatal(err)
 		}
 	}()
 
-	// start the workers afterwards. the monitor doesn't need to know beforehand how many workers are there but you
+	// start the workers afterwards. the monitor doesn't need to know beforehand how many workers there are but you
 	// should signal active at least once because the monitor starts out assuming all workers are idle.
 	workerCount := 5
 	var wg sync.WaitGroup
