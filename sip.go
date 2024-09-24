@@ -22,14 +22,15 @@ type ScaleInProtector struct {
 	// InstanceId is the instance Id to enable or disable scale-in protection.
 	//
 	// If not specified, an imds.Client created from the default aws.Config (config.LoadDefaultConfig) will be used to
-	// detect the instance Id of the host. If one cannot be detected, StartMonitoring will return an InitError.
+	// detect the instance Id of the host. If one cannot be detected, StartMonitoring will return a non-nil error.
 	InstanceId string
 	// AutoScalingGroupName is the name of the Auto Scaling group that contains the instance specified by InstanceId.
 	//
 	// If not specified, the given AutoScaling will be used to find the Auto Scaling group that contains the instance
-	// specified by InstanceId. If one cannot be found, StartMonitoring will return an InitError. If both InstanceId and
-	// AutoScalingGroupName are given but the instance is detached from the Auto Scaling group, an InitError is also
-	// returned.
+	// specified by InstanceId. If one cannot be found, StartMonitoring will return a non-nil error. If both InstanceId
+	// and AutoScalingGroupName are given but the Auto Scaling group does not contain the instance, an error is also
+	// returned (you cannot have the monitor effects an instance different from the one it's running on for safety). If
+	// you want an option to disable this check, send a PR.
 	AutoScalingGroupName string
 	// AutoScaling is the client that will be used to make Auto Scaling service calls.
 	//
@@ -37,20 +38,23 @@ type ScaleInProtector struct {
 	AutoScaling AutoScalingAPIClient
 	// IdleAtLeast specifies the amount of time all workers must have been idle before scale-in protection may be
 	// disabled.
+	//
+	// The delay starts from when the last worker becomes idle. If you want to measure from the moment the first worker
+	// becomes idle, send a PR (trailing vs. leading delay).
 	IdleAtLeast time.Duration
 	// Logger is used to log whenever the scale-in protection changes.
 	//
 	// Defaults to log.Default.
 	Logger *log.Logger
 
-	ach    chan string
-	ich    chan string
-	active map[string]bool
-
-	// only need one mutex to guard protected and started.
+	// only need one mutex to guard protected and started. the remaining fields will only be accessed from the goroutine
+	// that calls StartMonitoring so they don't need concurrency control.
 	mu        sync.Mutex
 	protected bool
 	started   bool
+	ach       chan string
+	ich       chan string
+	active    map[string]bool
 }
 
 // AutoScalingAPIClient extracts the subset of autoscaling.Client APIs that ScaleInProtector uses.
@@ -73,6 +77,10 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 	var delay *time.Timer
 mainLoop:
 	for {
+		// TODO there's probably a way to use an infinite time.Timer or a no-op case to simplify the two select blocks into one.
+		/// but for now, two are used. the first one is when there is no pending timer to disable scale-in protection,
+		// while the latter is entered only when all workers are idle with a pending disable scale-in protection timer.
+
 		if delay == nil {
 			select {
 			case <-ctx.Done():
@@ -128,10 +136,10 @@ mainLoop:
 	}
 }
 
-// IsProtectedFromScaleIn returns the internal timedStatus reflecting whether scale-in protection is enabled or not.
+// IsProtectedFromScaleIn returns the internal flag reflecting whether scale-in protection is enabled or not.
 //
 // It is entirely possible for the monitor to think it has scale-in protection enabled while an external action may have
-// disabled it.
+// disabled it and vice versa.
 func (s *ScaleInProtector) IsProtectedFromScaleIn() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

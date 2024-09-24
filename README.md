@@ -26,6 +26,9 @@ want to disable scale-in protection to let the Auto Scaling group reclaim your i
 
 ## Usage
 
+There is only one ScaleInProtector struct. I would recommend copying, pasting, and customising it to your needs, but you
+can also declare a dependency on the package too.
+
 ```bash
 go get github.com/nguyengg/go-scale-in-protection
 ```
