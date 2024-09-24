@@ -42,6 +42,8 @@ type ScaleInProtector struct {
 	//
 	// Defaults to log.Default.
 	Logger *log.Logger
+	// Verbose will log every time a worker reports active or idle.
+	Verbose bool
 
 	ach    chan string
 	ich    chan string
@@ -79,6 +81,9 @@ mainLoop:
 				return ctx.Err()
 			case id := <-s.ach:
 				// enabling scale-in protection takes place right away.
+				if s.Verbose {
+					s.Logger.Printf("worker %s reports active", id)
+				}
 				s.active[id] = true
 				if err = s.toggle(ctx, true); err != nil {
 					return err
@@ -86,15 +91,25 @@ mainLoop:
 			case id := <-s.ich:
 				// if all workers are idle then scale-in protection may be delayed or may take effect right away.
 				s.active[id] = false
-				for _, active := range s.active {
+				for i, active := range s.active {
 					if !active {
+						if s.Verbose {
+							s.Logger.Printf("worker %s reports idle but worker %s is still active", id, i)
+						}
 						continue mainLoop
 					}
 				}
 				if s.IdleAtLeast > 0 {
-					s.Logger.Printf("all workers idle, will disable scale-in protection in %.4f seconds", s.IdleAtLeast.Seconds())
+					if s.Verbose {
+						s.Logger.Printf("worker %s reports idle, will disable scale-in protection in %.4f seconds", id, s.IdleAtLeast.Seconds())
+					} else {
+						s.Logger.Printf("all workers idle, will disable scale-in protection in %.4f seconds", s.IdleAtLeast.Seconds())
+					}
 					delay = time.NewTimer(s.IdleAtLeast)
 					continue mainLoop
+				}
+				if s.Verbose {
+					s.Logger.Printf("worker %s reports idle", id)
 				}
 				if err = s.toggle(ctx, false); err != nil {
 					return err
@@ -118,12 +133,18 @@ mainLoop:
 			delay.Stop()
 			delay = nil
 
+			if s.Verbose {
+				s.Logger.Printf("worker %s reports active", id)
+			}
 			s.active[id] = true
 			if err = s.toggle(ctx, true); err != nil {
 				return err
 			}
-		case <-s.ich:
+		case id := <-s.ich:
 			// all workers should still be idle so do nothing here.
+			if s.Verbose {
+				s.Logger.Printf("worker %s reports idle", id)
+			}
 		}
 	}
 }
