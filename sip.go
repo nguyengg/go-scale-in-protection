@@ -47,13 +47,13 @@ type ScaleInProtector struct {
 	// Defaults to log.Default.
 	Logger *log.Logger
 
+	ch    chan string
+	delay <-chan time.Time
+
 	mu        sync.Mutex
 	active    map[string]bool
 	protected bool
 	started   bool
-
-	ach chan string
-	ich chan string
 }
 
 // AutoScalingAPIClient extracts the subset of autoscaling.Client APIs that ScaleInProtector uses.
@@ -70,42 +70,23 @@ type AutoScalingAPIClient interface {
 //
 // Panics if StartMonitoring has been called more than once.
 func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
-	if err = s.init(ctx); err != nil {
-		return err
-	}
-
-	var delay <-chan time.Time
-
-	for {
+	for err = s.init(ctx); err != nil; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-s.ach:
-			// enabling scale-in protection takes place right away.
-			if err = s.toggle(ctx, true); err != nil {
-				return err
-			}
-		case <-s.ich:
-			if len(s.active) > 0 || !s.protected || delay != nil {
-				continue
-			}
-
-			// for simplicity, always use delay to effect disabling of scale-in protection.
-			if delay = time.After(max(0, s.IdleAtLeast)); s.IdleAtLeast > 0 {
-				s.Logger.Printf("all workers idle, will disable scale-in protection at %s (in %.4f seconds)", time.Now().Add(s.IdleAtLeast).Format(time.RFC3339), s.IdleAtLeast.Seconds())
-			}
-		case <-delay:
-			// s.ach and s.ich only has values while s.mu is locked but not delay so must do its own locking here.
+		case <-s.ch:
+			err = s.act(ctx)
+		case <-s.delay:
 			s.mu.Lock()
-			err = s.toggle(ctx, false)
-			s.mu.Unlock()
-			if err != nil {
-				return err
+			if len(s.active) == 0 {
+				err = s.toggle(ctx, false)
 			}
-
-			delay = nil
+			s.mu.Unlock()
+			s.delay = nil
 		}
 	}
+
+	return
 }
 
 // IsProtectedFromScaleIn returns the internal flag reflecting whether scale-in protection is enabled or not.
@@ -135,9 +116,8 @@ func (s *ScaleInProtector) SignalActive(id string) {
 	}
 
 	select {
-	case s.ach <- id:
+	case s.ch <- id:
 	default:
-		// in case StartMonitoring has not been called, s.ach will be nil.
 	}
 }
 
@@ -153,9 +133,8 @@ func (s *ScaleInProtector) SignalIdle(id string) {
 	delete(s.active, id)
 
 	select {
-	case s.ich <- id:
+	case s.ch <- id:
 	default:
-		// in case StartMonitoring has not been called, s.ich will be nil.
 	}
 }
 
@@ -221,18 +200,43 @@ func (s *ScaleInProtector) init(ctx context.Context) error {
 		}
 	}
 
-	s.ach = make(chan string)
-	s.ich = make(chan string)
+	s.ch = make(chan string)
 
 	return nil
 }
 
-func (s *ScaleInProtector) toggle(ctx context.Context, protected bool) error {
+func (s *ScaleInProtector) act(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	protected := len(s.active) > 0
 	if s.protected == protected {
 		return nil
 	}
 
+	// enabling scale-in protection will happen right away.
+	if protected {
+		return s.toggle(ctx, true)
+	}
+
+	// at this point, we're looking to disable scale-in protection.
+	// if there's already a pending timer to disable scale-in protection then return and wait for it.
+	// otherwise, start the timer or make the service call right away.
+	if s.delay != nil {
+		return nil
+	}
+	if s.IdleAtLeast <= 0 {
+		return s.toggle(ctx, false)
+	}
+
+	s.Logger.Printf("all workers idle, will disable scale-in protection at %s (in %.4f seconds)", time.Now().Add(s.IdleAtLeast).Format(time.RFC3339), s.IdleAtLeast.Seconds())
+	s.delay = time.After(s.IdleAtLeast)
+	return nil
+}
+
+func (s *ScaleInProtector) toggle(ctx context.Context, protected bool) error {
 	s.Logger.Printf("setting scale-in protection to %t", protected)
+
 	if _, err := s.AutoScaling.SetInstanceProtection(ctx, &autoscaling.SetInstanceProtectionInput{
 		AutoScalingGroupName: &s.AutoScalingGroupName,
 		InstanceIds:          []string{s.InstanceId},
