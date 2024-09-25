@@ -46,17 +46,14 @@ type ScaleInProtector struct {
 	//
 	// Defaults to log.Default.
 	Logger *log.Logger
-	// Verbose enables detailed logging while development is in progress.
-	Verbose bool
 
-	// only need one mutex to guard protected and started. the remaining fields will only be accessed from the goroutine
-	// that calls StartMonitoring so they don't need concurrency control.
 	mu        sync.Mutex
+	active    map[string]bool
 	protected bool
 	started   bool
-	ach       chan string
-	ich       chan string
-	active    map[string]bool
+
+	ach chan string
+	ich chan string
 }
 
 // AutoScalingAPIClient extracts the subset of autoscaling.Client APIs that ScaleInProtector uses.
@@ -76,98 +73,36 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 		return err
 	}
 
-	var delay *time.Timer
+	var delay <-chan time.Time
 
 	for {
-		// TODO there's probably a way to use an infinite time.Timer or a no-op case to simplify the two select blocks into one.
-		/// but for now, two are used. the first one is when there is no pending timer to disable scale-in protection,
-		// while the latter is entered only when all workers are idle with a pending disable scale-in protection timer.
-
-		if delay == nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case id := <-s.ach:
-				// enabling scale-in protection takes place right away.
-				if s.active[id] {
-					if s.Verbose {
-						s.Logger.Printf("worker %s remains active", id)
-					}
-					continue
-				}
-				if s.Verbose {
-					s.Logger.Printf("worker %s becomes active", id)
-				}
-				s.active[id] = true
-
-				if err = s.toggle(ctx, true); err != nil {
-					return err
-				}
-			case id := <-s.ich:
-				// if all workers are idle then scale-in protection may be delayed or may take effect right away.
-				// unlike active which immediately enable scale-in protection, all workers must be idle before scale-in
-				// protection is eligible for disabling.
-				if s.Verbose {
-					if s.active[id] {
-						s.Logger.Printf("worker %s becomes idle", id)
-					} else {
-						s.Logger.Printf("worker %s remains idle", id)
-					}
-				}
-
-				delete(s.active, id)
-				if n := len(s.active); n > 0 {
-					if s.Verbose {
-						s.Logger.Printf("%d workers are still active, will not disable scale-in protection", n)
-					}
-					continue
-				}
-
-				if s.IdleAtLeast > 0 {
-					if s.IsProtectedFromScaleIn() {
-						s.Logger.Printf("all workers idle, will disable scale-in protection at %s (in %.4f seconds)", time.Now().Add(s.IdleAtLeast).Format(time.RFC3339), s.IdleAtLeast.Seconds())
-						delay = time.NewTimer(s.IdleAtLeast)
-					}
-
-					continue
-				}
-
-				if err = s.toggle(ctx, false); err != nil {
-					return err
-				}
-			}
-
-			continue
-		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-delay.C:
-			delay.Stop()
-			delay = nil
-
-			if err = s.toggle(ctx, false); err != nil {
-				return err
-			}
-		case id := <-s.ach:
-			// a worker becomes active so do not disable scale-in protection.
-			delay.Stop()
-			delay = nil
-
-			if s.Verbose {
-				s.Logger.Printf("worker %s becomes active", id)
-			}
-			s.active[id] = true
-
+		case <-s.ach:
+			// enabling scale-in protection takes place right away.
 			if err = s.toggle(ctx, true); err != nil {
 				return err
 			}
-		case id := <-s.ich:
-			// all workers should still be idle so do nothing here.
-			if s.Verbose {
-				s.Logger.Printf("worker %s remains idle", id)
+		case <-s.ich:
+			if len(s.active) > 0 || !s.protected {
+				continue
 			}
+
+			// for simplicity, always use delay to effect disabling of scale-in protection.
+			if delay = time.After(max(0, s.IdleAtLeast)); s.IdleAtLeast > 0 {
+				s.Logger.Printf("all workers idle, will disable scale-in protection at %s (in %.4f seconds)", time.Now().Add(s.IdleAtLeast).Format(time.RFC3339), s.IdleAtLeast.Seconds())
+			}
+		case <-delay:
+			// s.ach and s.ich only has values while s.mu is locked but not delay so must do its own locking here.
+			s.mu.Lock()
+			err = s.toggle(ctx, false)
+			s.mu.Unlock()
+			if err != nil {
+				return err
+			}
+
+			delay = nil
 		}
 	}
 }
@@ -185,25 +120,37 @@ func (s *ScaleInProtector) IsProtectedFromScaleIn() bool {
 
 // SignalActive should be called by a worker passing its identifier when it has an active job.
 func (s *ScaleInProtector) SignalActive(id string) {
-	if s.Verbose {
-		s.Logger.Printf("worker %s is signalling active", id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.active[id] = true
+
+	select {
+	case s.ach <- id:
+	default:
+		// in case StartMonitoring has not been called, s.ach will be nil.
 	}
-	s.ach <- id
 }
 
 // SignalIdle should be called by a worker passing its identifier when it has become idle.
 func (s *ScaleInProtector) SignalIdle(id string) {
-	if s.Verbose {
-		s.Logger.Printf("worker %s is signalling idle", id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.active, id)
+
+	select {
+	case s.ich <- id:
+	default:
+		// in case StartMonitoring has not been called, s.ich will be nil.
 	}
-	s.ich <- id
 }
 
 func (s *ScaleInProtector) init(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.started {
+	started := s.started
+	s.mu.Unlock()
+	if started {
 		panic("monitor has already been started once")
 	}
 
@@ -263,19 +210,12 @@ func (s *ScaleInProtector) init(ctx context.Context) error {
 
 	s.ach = make(chan string)
 	s.ich = make(chan string)
-	s.active = make(map[string]bool)
 
 	return nil
 }
 
 func (s *ScaleInProtector) toggle(ctx context.Context, protected bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.protected == protected {
-		if s.Verbose {
-			s.Logger.Printf("no changes to scale-in protection (%t)", protected)
-		}
 		return nil
 	}
 
