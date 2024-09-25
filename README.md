@@ -24,10 +24,14 @@ Essentially, if you have any number of workers who can be either ACTIVE or IDLE,
 protection when any of your worker is actively doing some work, while once all the workers have become idle, you would
 want to disable scale-in protection to let the Auto Scaling group reclaim your instance naturally.
 
+**Note**: there is a possibility that your instance is terminated in-between the `GetWorkUnit()` and the
+`ProcessWorkUnit(Work)` calls. Generally if your visibility timeout is low enough, this is not an issue as a different
+worker would be able to pick up the message again.
+
 ## Usage
 
-There is only one ScaleInProtector struct. I would recommend copying, pasting, and customising it to your needs, but you
-can also declare a dependency on the package too.
+There is only one very simple `ScaleInProtector` struct. You can declare a dependency on the package and use it; and I
+would recommend copying, pasting, and customising it to your needs as well.
 
 ```bash
 go get github.com/nguyengg/go-scale-in-protection
@@ -63,29 +67,15 @@ func main() {
 		IdleAtLeast: 15 * time.Minute,
 	}
 
-	// always starts the monitor's main loop in a goroutine first because it doesn't return until context is cancelled
-	// or it encounters an error. the loop must be started first so that SignalActive and SignalIdle aren't blocked.
-	go func() {
-		if err := s.StartMonitoring(ctx); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-
-			log.Fatal(err)
-		}
-	}()
-
-	// start the workers afterwards. the monitor doesn't need to know beforehand how many workers there are but you
-	// should signal active at least once because the monitor starts out assuming all workers are idle.
+	// you can start the workers first or start the monitor's main loop first, either works.
+	// the monitor doesn't need to know beforehand how many workers there are but you should signal active at least once
+	// because the monitor starts out assuming all workers are idle.
 	workerCount := 5
 	var wg sync.WaitGroup
 	for i := range workerCount {
 		wg.Add(1)
-		go func() {
+		go func(id string) {
 			defer wg.Done()
-
-			id := strconv.Itoa(i)
-			s.SignalActive(id)
 
 			for {
 				// get some work.
@@ -98,7 +88,22 @@ func main() {
 				// mark idle.
 				s.SignalIdle(id)
 			}
-		}()
+		}(strconv.Itoa(i))
 	}
+
+	// always starts the monitor's main loop in a goroutine because it doesn't return until context is cancelled or it
+	// encounters an error.
+	wg.Add(1)
+	go func() {
+		if err := s.StartMonitoring(ctx); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+
+			log.Fatal(err)
+		}
+	}()
+
+	wg.Wait()
 }
 ```

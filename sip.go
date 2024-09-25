@@ -65,9 +65,10 @@ type AutoScalingAPIClient interface {
 // StartMonitoring starts the monitoring loop.
 //
 // The method should be called in a separate goroutine because it will not return until the given context is cancelled;
-// [context.Context.Err] is always returned in this case.
+// [context.Context.Err] is always returned in this case. Errors from making Auto Scaling service calls also cause the
+// loop to terminate.
 //
-// The method panics if it has been called more than once.
+// Panics if StartMonitoring has been called more than once.
 func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 	if err = s.init(ctx); err != nil {
 		return err
@@ -119,6 +120,10 @@ func (s *ScaleInProtector) IsProtectedFromScaleIn() bool {
 }
 
 // SignalActive should be called by a worker passing its identifier when it has an active job.
+//
+// It is safe to call this method even if StartMonitoring hasn't been called. The method may block if there are
+// concurrent calls to either SignalActive and SignalIdle. Once StartMonitoring has been called, the method may also
+// block until the scale-in protection change has been effected.
 func (s *ScaleInProtector) SignalActive(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,6 +142,10 @@ func (s *ScaleInProtector) SignalActive(id string) {
 }
 
 // SignalIdle should be called by a worker passing its identifier when it has become idle.
+//
+// It is safe to call this method even if StartMonitoring hasn't been called. The method may block if there are
+// concurrent calls to either SignalActive and SignalIdle. Once StartMonitoring has been called, the method may also
+// block until the scale-in protection change has been effected.
 func (s *ScaleInProtector) SignalIdle(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
