@@ -123,7 +123,11 @@ func (s *ScaleInProtector) SignalActive(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.active[id] = true
+	if s.active == nil {
+		s.active = map[string]bool{id: true}
+	} else {
+		s.active[id] = true
+	}
 
 	select {
 	case s.ach <- id:
