@@ -85,7 +85,7 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 				return err
 			}
 		case <-s.ich:
-			if len(s.active) > 0 || !s.protected {
+			if len(s.active) > 0 || !s.protected || delay != nil {
 				continue
 			}
 
