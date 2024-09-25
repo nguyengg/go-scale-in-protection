@@ -185,11 +185,17 @@ func (s *ScaleInProtector) IsProtectedFromScaleIn() bool {
 
 // SignalActive should be called by a worker passing its identifier when it has an active job.
 func (s *ScaleInProtector) SignalActive(id string) {
+	if s.Verbose {
+		s.Logger.Printf("worker %s is signalling active", id)
+	}
 	s.ach <- id
 }
 
 // SignalIdle should be called by a worker passing its identifier when it has become idle.
 func (s *ScaleInProtector) SignalIdle(id string) {
+	if s.Verbose {
+		s.Logger.Printf("worker %s is signalling idle", id)
+	}
 	s.ich <- id
 }
 
