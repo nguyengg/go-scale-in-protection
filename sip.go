@@ -70,7 +70,7 @@ type AutoScalingAPIClient interface {
 //
 // Panics if StartMonitoring has been called more than once.
 func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
-	for err = s.init(ctx); err != nil; {
+	for err = s.init(ctx); err == nil; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
