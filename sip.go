@@ -46,6 +46,8 @@ type ScaleInProtector struct {
 	//
 	// Defaults to log.Default.
 	Logger *log.Logger
+	// Verbose enables detailed logging while development is in progress.
+	Verbose bool
 
 	// only need one mutex to guard protected and started. the remaining fields will only be accessed from the goroutine
 	// that calls StartMonitoring so they don't need concurrency control.
@@ -87,6 +89,15 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 				return ctx.Err()
 			case id := <-s.ach:
 				// enabling scale-in protection takes place right away.
+				if s.active[id] {
+					if s.Verbose {
+						s.Logger.Printf("worker %s remains active", id)
+					}
+					continue
+				}
+				if s.Verbose {
+					s.Logger.Printf("worker %s becomes active", id)
+				}
 				s.active[id] = true
 
 				if err = s.toggle(ctx, true); err != nil {
@@ -96,8 +107,19 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 				// if all workers are idle then scale-in protection may be delayed or may take effect right away.
 				// unlike active which immediately enable scale-in protection, all workers must be idle before scale-in
 				// protection is eligible for disabling.
+				if s.Verbose {
+					if s.active[id] {
+						s.Logger.Printf("worker %s becomes idle", id)
+					} else {
+						s.Logger.Printf("worker %s remains idle", id)
+					}
+				}
+
 				delete(s.active, id)
-				if len(s.active) > 0 {
+				if n := len(s.active); n > 0 {
+					if s.Verbose {
+						s.Logger.Printf("%d workers are still active, will not disable scale-in protection", n)
+					}
 					continue
 				}
 
@@ -133,12 +155,19 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 			delay.Stop()
 			delay = nil
 
+			if s.Verbose {
+				s.Logger.Printf("worker %s becomes active", id)
+			}
 			s.active[id] = true
+
 			if err = s.toggle(ctx, true); err != nil {
 				return err
 			}
-		case <-s.ich:
+		case id := <-s.ich:
 			// all workers should still be idle so do nothing here.
+			if s.Verbose {
+				s.Logger.Printf("worker %s remains idle", id)
+			}
 		}
 	}
 }
@@ -238,6 +267,9 @@ func (s *ScaleInProtector) toggle(ctx context.Context, protected bool) error {
 	defer s.mu.Unlock()
 
 	if s.protected == protected {
+		if s.Verbose {
+			s.Logger.Printf("no changes to scale-in protection (%t)", protected)
+		}
 		return nil
 	}
 
@@ -245,7 +277,7 @@ func (s *ScaleInProtector) toggle(ctx context.Context, protected bool) error {
 	if _, err := s.AutoScaling.SetInstanceProtection(ctx, &autoscaling.SetInstanceProtectionInput{
 		AutoScalingGroupName: &s.AutoScalingGroupName,
 		InstanceIds:          []string{s.InstanceId},
-		ProtectedFromScaleIn: aws.Bool(protected),
+		ProtectedFromScaleIn: &protected,
 	}); err != nil {
 		return fmt.Errorf("set scale-in protection to %t error: %w", protected, err)
 	}
