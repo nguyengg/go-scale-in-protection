@@ -75,7 +75,7 @@ func (s *ScaleInProtector) StartMonitoring(ctx context.Context) (err error) {
 	}
 
 	var delay *time.Timer
-mainLoop:
+
 	for {
 		// TODO there's probably a way to use an infinite time.Timer or a no-op case to simplify the two select blocks into one.
 		/// but for now, two are used. the first one is when there is no pending timer to disable scale-in protection,
@@ -88,22 +88,28 @@ mainLoop:
 			case id := <-s.ach:
 				// enabling scale-in protection takes place right away.
 				s.active[id] = true
+
 				if err = s.toggle(ctx, true); err != nil {
 					return err
 				}
 			case id := <-s.ich:
 				// if all workers are idle then scale-in protection may be delayed or may take effect right away.
-				s.active[id] = false
-				for _, active := range s.active {
-					if active {
-						continue mainLoop
-					}
+				// unlike active which immediately enable scale-in protection, all workers must be idle before scale-in
+				// protection is eligible for disabling.
+				delete(s.active, id)
+				if len(s.active) > 0 {
+					continue
 				}
+
 				if s.IdleAtLeast > 0 {
-					s.Logger.Printf("all workers idle, will disable scale-in protection at %s (in %.4f seconds)", time.Now().Add(s.IdleAtLeast).Format(time.RFC3339), s.IdleAtLeast.Seconds())
-					delay = time.NewTimer(s.IdleAtLeast)
-					continue mainLoop
+					if s.IsProtectedFromScaleIn() {
+						s.Logger.Printf("all workers idle, will disable scale-in protection at %s (in %.4f seconds)", time.Now().Add(s.IdleAtLeast).Format(time.RFC3339), s.IdleAtLeast.Seconds())
+						delay = time.NewTimer(s.IdleAtLeast)
+					}
+
+					continue
 				}
+
 				if err = s.toggle(ctx, false); err != nil {
 					return err
 				}
@@ -118,6 +124,7 @@ mainLoop:
 		case <-delay.C:
 			delay.Stop()
 			delay = nil
+
 			if err = s.toggle(ctx, false); err != nil {
 				return err
 			}
